@@ -2379,26 +2379,6 @@ class HallucinatedCardsError(ValueError):
         )
 
 
-def _result_validation_fail(
-    conn: sqlite3.Connection,
-    task_id: str,
-    reason: str,
-    detail: str,
-) -> None:
-    """Emit a ``completion_blocked_invalid_result`` event and leave the
-    task in its current state (no status change, no mutation to result
-    or result_sha256).  The caller is expected to return False from
-    ``complete_task`` immediately after.
-    """
-    with write_txn(conn):
-        _append_event(
-            conn, task_id, "completion_blocked_invalid_result",
-            {
-                "reason": reason,
-                "detail": detail[:1000],
-            },
-        )
-
 
 def complete_task(
     conn: sqlite3.Connection,
