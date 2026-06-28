@@ -4091,6 +4091,27 @@ def complete_task(
     else:
         verified_cards = []
 
+    # --- result validation (fail-closed, Issue #146) ---
+    # Validate AND canonicalise the result BEFORE entering the write
+    # transaction.  If validation fails we emit an auditable event in
+    # its own txn and return False — the task stays retryable.
+    try:
+        result = _validate_completion_result(result)
+    except ValueError as exc:
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_invalid_result",
+                {
+                    "error": str(exc),
+                    "result_preview": (
+                        (result or "").strip()[:400] if result else None
+                    ),
+                },
+            )
+        return False
+    result_sha256 = _canonical_result_sha256(result)
+
+    # --- atomic completion write ---
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
