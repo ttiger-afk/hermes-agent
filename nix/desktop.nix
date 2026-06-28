@@ -57,7 +57,7 @@ let
 
           # simple-git is the electron main's external runtime dep.  It is not
           # bundled into main.cjs; instead the stage-native-deps.cjs call above
-          # copies its closure to apps/desktop/build/native-deps/node_modules/,
+          # copies its closure to apps/desktop/build/native-deps/vendor/node_modules/,
           # which installPhase ships into $out/native-deps/ — the same path the
           # packaged app uses.  electron/git-review-ops.cjs resolves it from
           # process.resourcesPath when the hoisted require() isn't reachable
@@ -134,7 +134,7 @@ stdenv.mkDerivation {
       --replace-fail "process.resourcesPath" "'$out/share/hermes-desktop'"
 
     # git-review-ops.cjs has the same process.resourcesPath fallback for its
-    # staged simple-git dep (native-deps/node_modules/), so it needs the same
+    # staged simple-git dep (native-deps/vendor/node_modules/), so it needs the same
     # rewrite — otherwise the require() fallback resolves against the electron
     # dist's resources path and fails to load simple-git (issue #52735).
     substituteInPlace $out/share/hermes-desktop/electron/git-review-ops.cjs \

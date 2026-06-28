@@ -70,7 +70,7 @@ const NATIVE_DEPS = [
 // that workspace dedup hoists into the repo-root node_modules -- out of reach
 // of electron-builder's file collector, exactly like node-pty above.  Unlike
 // node-pty there is no native binary to select; we stage each package's whole
-// directory into build/native-deps/node_modules/<name> so the dep's own
+// directory into build/native-deps/vendor/node_modules/<name> so the dep's own
 // internal require()s resolve against a real node_modules tree, and the
 // requiring file (electron/git-review-ops.cjs) falls back to that path via
 // process.resourcesPath when the normal require() fails.  See issue #52735
@@ -79,8 +79,17 @@ const NATIVE_DEPS = [
 // The closure is resolved at stage time by walking dependencies +
 // optionalDependencies, so a simple-git version bump that pulls in a new
 // transitive dep can't silently re-introduce the crash.
+//
+// Layout note: the closure lands in build/native-deps/vendor/node_modules/,
+// NOT build/native-deps/node_modules/.  electron-builder's file collector
+// hard-drops a `node_modules` directory that sits at the ROOT of an
+// extraResources copy (app-builder-lib/out/util/filter.js: `if (relative ===
+// "node_modules") return false`), but keeps a NESTED one.  Nesting under
+// `vendor/` makes node_modules a subdirectory so it survives packing; the
+// require() fallback in git-review-ops.cjs resolves the matching
+// vendor/node_modules path.
 const JS_DEP_ROOTS = ['simple-git']
-const JS_DEP_STAGE_ROOT = path.join(STAGE_ROOT, 'node_modules')
+const JS_DEP_STAGE_ROOT = path.join(STAGE_ROOT, 'vendor', 'node_modules')
 
 function rmrf(target) {
   fs.rmSync(target, { recursive: true, force: true })
@@ -209,7 +218,7 @@ function resolveJsClosure(roots) {
   return closure
 }
 
-// Stage the resolved JS dependency closure into build/native-deps/node_modules/
+// Stage the resolved JS dependency closure into build/native-deps/vendor/node_modules/
 // so the packaged app (and the nix output) can require() it from
 // process.resourcesPath when the hoisted-root require() isn't reachable.  Each
 // package is copied whole (minus node_modules/ — the closure is flattened so
@@ -232,7 +241,7 @@ function stageJsClosure(roots) {
     staged += 1
   }
   console.log(
-    `[stage-native-deps] node_modules/: ${staged} package(s) ` +
+    `[stage-native-deps] vendor/node_modules/: ${staged} package(s) ` +
       `(${[...closure.keys()].sort().join(', ')})`
   )
 }
