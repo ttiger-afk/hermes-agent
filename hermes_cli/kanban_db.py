@@ -71,6 +71,7 @@ new locking.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -1707,6 +1708,35 @@ def _append_event(
     )
 
 
+def _result_validation_fail(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+    detail: str,
+) -> None:
+    """Emit ``completion_blocked_invalid_result`` event and a ``blocked`` status change.
+
+    Called OUTSIDE the write txn (fires its own dedicated txn) so the audit
+    event is durable even if the caller discards the connection afterwards.
+    The task remains in its current status (running/ready) — it is NOT moved
+    to done.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        _append_event(
+            conn, task_id, "completion_blocked_invalid_result",
+            {
+                "reason": reason,
+                "detail": detail,
+            },
+        )
+        # Move to blocked so the dispatcher stops retrying the same worker
+        conn.execute(
+            "UPDATE tasks SET status='blocked' WHERE id=? AND status IN ('running','ready')",
+            (task_id,),
+        )
+
+
 def _end_run(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2349,6 +2379,27 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+def _result_validation_fail(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+    detail: str,
+) -> None:
+    """Emit a ``completion_blocked_invalid_result`` event and leave the
+    task in its current state (no status change, no mutation to result
+    or result_sha256).  The caller is expected to return False from
+    ``complete_task`` immediately after.
+    """
+    with write_txn(conn):
+        _append_event(
+            conn, task_id, "completion_blocked_invalid_result",
+            {
+                "reason": reason,
+                "detail": detail[:1000],
+            },
+        )
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -2416,37 +2467,77 @@ def complete_task(
     else:
         verified_cards = []
 
+    # ── Result authority gate ────────────────────────────────────────
+    # Reject NULL, empty, whitespace-only, "{}", or invalid JSON results.
+    # Valid results must survive a json.loads round-trip.  The SHA-256
+    # is computed from the canonical (re-serialised) form so that the
+    # stored hash is reproducible by any reader that receives the same
+    # result bytes.
+    result_sha256 = None
+    if result is None:
+        _result_validation_fail(
+            conn, task_id, "null_result",
+            "result is None — task must produce a valid JSON result"
+        )
+        return False
+    stripped = result.strip()
+    if not stripped:
+        _result_validation_fail(
+            conn, task_id, "empty_result",
+            "result is empty or whitespace-only"
+        )
+        return False
+    # Normalise: compact JSON serialization for hash stability
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        _result_validation_fail(
+            conn, task_id, "invalid_json",
+            f"result is not valid JSON: {result[:200]}"
+        )
+        return False
+    if isinstance(parsed, dict) and not parsed:
+        _result_validation_fail(
+            conn, task_id, "empty_object",
+            "result is an empty JSON object {{}} — task must produce meaningful output"
+        )
+        return False
+    canonical = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    result_sha256 = hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
+                   SET status        = 'done',
+                       result        = ?,
+                       result_sha256 = ?,
+                       completed_at  = ?,
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                 """,
-                (result, now, task_id),
+                (result, result_sha256, now, task_id),
             )
         else:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL
+                   SET status        = 'done',
+                       result        = ?,
+                       result_sha256 = ?,
+                       completed_at  = ?,
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                    AND current_run_id = ?
                 """,
-                (result, now, task_id, int(expected_run_id)),
+                (result, result_sha256, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
