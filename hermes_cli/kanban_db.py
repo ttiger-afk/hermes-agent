@@ -798,7 +798,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``max_retries=1`` blocks on the first failure. NULL (the common
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
-    max_retries          INTEGER
+    max_retries          INTEGER,
+    -- SHA-256 of the canonical result JSON. Written atomically with
+    -- ``result`` by ``complete_task`` so any reader can independently
+    -- recompute and verify integrity without trusting the writer.
+    result_sha256        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -1077,6 +1081,11 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # which is the correct default (they keep the global behaviour
         # they were getting before the column existed).
         _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
+
+    if "result_sha256" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "result_sha256", "result_sha256 TEXT"
+        )
 
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
