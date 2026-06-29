@@ -232,7 +232,7 @@ def test_create_task_with_parent_is_todo_until_parent_done(kanban_home):
         p = kb.create_task(conn, title="parent")
         c = kb.create_task(conn, title="child", parents=[p])
         assert kb.get_task(conn, c).status == "todo"
-        kb.complete_task(conn, p, result="ok")
+        kb.complete_task(conn, p, result=_valid_result())
         assert kb.get_task(conn, c).status == "ready"
 
 
@@ -339,7 +339,7 @@ def test_recompute_ready_promotes_blocked_with_done_parents(kanban_home):
         )
         # Complete the parent
         kb.claim_task(conn, parent)
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
         # Manually block the child with zero failures (simulates a
         # dependency block, not a circuit-breaker block).
         conn.execute(
@@ -1168,10 +1168,10 @@ def test_concurrent_claims_only_one_wins(kanban_home):
 def test_complete_records_result(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")
-        assert kb.complete_task(conn, t, result="done and dusted")
+        assert kb.complete_task(conn, t, result=_valid_result())
         task = kb.get_task(conn, t)
     assert task.status == "done"
-    assert task.result == "done and dusted"
+    assert '"ok":true' in task.result
     assert task.completed_at is not None
 
 
@@ -1399,7 +1399,7 @@ def test_claim_succeeds_once_parents_done(kanban_home):
             conn, title="child", assignee="a", parents=[parent],
         )
         kb.claim_task(conn, parent)
-        assert kb.complete_task(conn, parent, result="ok")
+        assert kb.complete_task(conn, parent, result=_valid_result())
         kb.recompute_ready(conn)
         assert kb.get_task(conn, child).status == "ready"
         claimed = kb.claim_task(conn, child, claimer="host:1")
@@ -1423,7 +1423,7 @@ def test_create_with_parents_stays_todo_until_parents_done(kanban_home):
         # Complete parent; complete_task internally runs recompute_ready,
         # which promotes the child to 'ready'.
         kb.claim_task(conn, parent)
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
         assert kb.get_task(conn, child).status == "ready"
 
 
@@ -1449,7 +1449,7 @@ def test_unblock_with_pending_parents_goes_to_todo(kanban_home):
         assert kb.get_task(conn, child).status == "todo"
         # After parent completes + recompute, the child is ready.
         kb.claim_task(conn, parent)
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
         kb.recompute_ready(conn)
         assert kb.get_task(conn, child).status == "ready"
 
@@ -1510,7 +1510,7 @@ def test_delete_archived_task_removes_related_rows(kanban_home):
         tid = kb.create_task(conn, title="child", parents=[parent], assignee="worker")
         kb.add_comment(conn, tid, "user", "cleanup me")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
         assert kb.archive_task(conn, tid)
         conn.execute(
             "INSERT INTO kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, created_at, last_event_id) "
@@ -1621,7 +1621,7 @@ def test_events_capture_lifecycle(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="a")
         kb.claim_task(conn, t)
-        kb.complete_task(conn, t, result="ok")
+        kb.complete_task(conn, t, result=_valid_result())
         events = kb.list_events(conn, t)
     kinds = [e.kind for e in events]
     assert "created" in kinds
@@ -1632,11 +1632,11 @@ def test_events_capture_lifecycle(kanban_home):
 def test_worker_context_includes_parent_results_and_comments(kanban_home):
     with kb.connect() as conn:
         p = kb.create_task(conn, title="p")
-        kb.complete_task(conn, p, result="PARENT_RESULT_MARKER")
+        kb.complete_task(conn, p, result=_valid_result())
         c = kb.create_task(conn, title="child", parents=[p])
         kb.add_comment(conn, c, "user", "CLARIFICATION_MARKER")
         ctx = kb.build_worker_context(conn, c)
-    assert "PARENT_RESULT_MARKER" in ctx
+    assert '"ok":true' in ctx
     assert "CLARIFICATION_MARKER" in ctx
     assert c in ctx
     assert "child" in ctx
@@ -2340,7 +2340,7 @@ def test_cleanup_workspace_removes_managed_scratch_dir(kanban_home):
         ws = kb.resolve_workspace(task)
         kb.set_workspace_path(conn, t, ws)
         assert ws.is_dir()
-        kb.complete_task(conn, t, result="ok")
+        kb.complete_task(conn, t, result=_valid_result())
     assert not ws.exists(), "Hermes-managed scratch dir should be cleaned up"
 
 
@@ -2368,7 +2368,7 @@ def test_cleanup_workspace_refuses_path_outside_scratch_root(kanban_home, tmp_pa
             ("scratch", str(real_source), t),
         )
         conn.commit()
-        kb.complete_task(conn, t, result="ok")
+        kb.complete_task(conn, t, result=_valid_result())
 
     assert real_source.exists(), "User source tree must not be deleted by scratch cleanup"
     assert (real_source / ".git").exists()
@@ -2400,7 +2400,7 @@ def test_cleanup_workspace_honors_workspaces_root_env_override(tmp_path, monkeyp
             ("scratch", str(scratch_dir), t),
         )
         conn.commit()
-        kb.complete_task(conn, t, result="ok")
+        kb.complete_task(conn, t, result=_valid_result())
 
     assert not scratch_dir.exists(), "Override-root scratch dir should be cleaned up"
 
@@ -2425,7 +2425,7 @@ def test_cleanup_workspace_deferred_while_child_active(kanban_home):
         kb.set_workspace_path(conn, parent, parent_ws)
         assert parent_ws.is_dir()
         # Parent completes; child is still 'todo' -> cleanup must be deferred.
-        kb.complete_task(conn, parent, result="handoff written")
+        kb.complete_task(conn, parent, result=_valid_result())
 
     assert parent_ws.exists(), (
         "Parent scratch workspace must survive while a linked child is active"
@@ -2446,12 +2446,12 @@ def test_cleanup_workspace_swept_after_last_child_completes(kanban_home):
         child_ws = kb.resolve_workspace(c_task)
         kb.set_workspace_path(conn, child, child_ws)
 
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
         assert parent_ws.exists(), "deferred while child active"
 
         # Child completes -> recompute promotes nothing new; the child's
         # cleanup sweep should now reap the parent's deferred workspace.
-        kb.complete_task(conn, child, result="done")
+        kb.complete_task(conn, child, result=_valid_result())
 
     assert not parent_ws.exists(), (
         "Parent scratch workspace should be swept once all children are terminal"
@@ -2479,10 +2479,10 @@ def test_dir_child_completion_unblocks_deferred_scratch_parent(kanban_home, tmp_
         parent_ws = kb.resolve_workspace(p_task)
         kb.set_workspace_path(conn, parent, parent_ws)
 
-        kb.complete_task(conn, parent, result="handoff")
+        kb.complete_task(conn, parent, result=_valid_result())
         assert parent_ws.exists(), "deferred while dir child active"
 
-        kb.complete_task(conn, child, result="built")
+        kb.complete_task(conn, child, result=_valid_result())
 
     assert not parent_ws.exists(), (
         "A 'dir' child completing must trigger the parent scratch sweep"

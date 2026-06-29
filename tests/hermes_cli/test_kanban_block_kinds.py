@@ -24,6 +24,11 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true}'
+
+
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / ".hermes"
@@ -157,7 +162,7 @@ def test_dependency_then_parent_done_promotes(kanban_home: Path) -> None:
         with kb.write_txn(conn):
             conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (parent,))
         kb.claim_task(conn, parent, claimer="worker")
-        kb.complete_task(conn, parent, result="done")
+        kb.complete_task(conn, parent, result=_valid_result())
         kb.recompute_ready(conn)
         assert kb.get_task(conn, child).status == "ready"
 
@@ -173,7 +178,7 @@ def test_completion_clears_block_memory(kanban_home: Path) -> None:
         kb.block_task(conn, tid, reason="x", kind="capability")
         kb.unblock_task(conn, tid)
         assert kb.get_task(conn, tid).block_recurrences == 1
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
         t = kb.get_task(conn, tid)
         assert t.status == "done"
         assert t.block_recurrences == 0

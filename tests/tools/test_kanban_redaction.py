@@ -12,6 +12,11 @@ import json
 import pytest
 
 
+def _valid_result():
+    """Return a valid JSON result string accepted by the result authority gate."""
+    return '{"ok":true}'
+
+
 # ---------------------------------------------------------------------------
 # Shared fixture — mirrors test_kanban_tools.py
 # ---------------------------------------------------------------------------
@@ -81,7 +86,7 @@ def test_kanban_complete_summary_scrubbed(worker_env):
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
     secret = "sk-ant-" + "A" * 40
-    kt._handle_complete({"summary": f"done, key={secret}"})
+    kt._handle_complete({"summary": f"done, key={secret}", "result": _valid_result()})
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
@@ -98,7 +103,7 @@ def test_kanban_complete_metadata_scrubbed(worker_env):
     from hermes_cli import kanban_db as kb
     secret = "ghp_" + "B" * 40
     metadata = {"token": secret, "count": 5}
-    kt._handle_complete({"summary": "done", "metadata": metadata})
+    kt._handle_complete({"summary": "done", "metadata": metadata, "result": _valid_result()})
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
@@ -180,7 +185,7 @@ def test_kanban_complete_result_field_scrubbed(worker_env):
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
     secret = "sk-" + "D" * 48
-    kt._handle_complete({"result": f"finished with key={secret}"})
+    kt._handle_complete({"result": f'{{"message":"finished with key={secret}"}}'})
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, worker_env)
