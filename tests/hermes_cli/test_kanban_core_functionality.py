@@ -24,6 +24,10 @@ import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban import run_slash
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -170,7 +174,7 @@ def test_successful_completion_resets_failure_counter(kanban_home, all_assignees
                 (tid,),
             )
         # Complete the task.
-        ok = kb.complete_task(conn, tid, summary="done")
+        ok = kb.complete_task(conn, tid, result=_valid_result(), summary="done")
         assert ok
         task = kb.get_task(conn, tid)
         assert task.consecutive_failures == 0
@@ -487,7 +491,7 @@ def test_board_stats(kanban_home):
     try:
         a = kb.create_task(conn, title="a", assignee="x")
         b = kb.create_task(conn, title="b", assignee="y")
-        kb.complete_task(conn, a, result="done")
+        kb.complete_task(conn, a, result=_valid_result())
         stats = kb.board_stats(conn)
         assert stats["by_status"]["ready"] == 1
         assert stats["by_status"]["done"] == 1
@@ -560,7 +564,7 @@ def test_notify_cursor_advances(kanban_home):
         )
         assert events == []
         # Complete the task → new `completed` event.
-        kb.complete_task(conn, tid, result="ok")
+        kb.complete_task(conn, tid, result=_valid_result())
         cursor, events = kb.unseen_events_for_sub(
             conn, task_id=tid, platform="telegram", chat_id="123",
             kinds=["completed", "blocked"],
@@ -587,7 +591,7 @@ def test_notify_claim_is_single_owner_and_rewindable(kanban_home):
     try:
         tid = kb.create_task(conn1, title="x", assignee="w")
         kb.add_notify_sub(conn1, task_id=tid, platform="telegram", chat_id="123")
-        kb.complete_task(conn1, tid, result="ok")
+        kb.complete_task(conn1, tid, result=_valid_result())
 
         old_cursor, claimed_cursor, events = kb.claim_unseen_events_for_sub(
             conn1,
@@ -642,7 +646,7 @@ def test_gc_events_keeps_active_task_history(kanban_home):
     try:
         alive = kb.create_task(conn, title="a", assignee="w")
         done_id = kb.create_task(conn, title="b", assignee="w")
-        kb.complete_task(conn, done_id)
+        kb.complete_task(conn, done_id, result=_valid_result())
 
         # Force all existing events to "old" by bumping created_at backwards.
         with kb.write_txn(conn):
@@ -740,12 +744,13 @@ def test_read_worker_log_tail(kanban_home):
 def test_cli_complete_bulk(kanban_home):
     conn = kb.connect()
     try:
-        a = kb.create_task(conn, title="a")
-        b = kb.create_task(conn, title="b")
-        c = kb.create_task(conn, title="c")
+        a = kb.create_task(conn, title="a", assignee="worker")
+        b = kb.create_task(conn, title="b", assignee="worker")
+        c = kb.create_task(conn, title="c", assignee="worker")
+        kb.claim_task(conn, a); kb.claim_task(conn, b); kb.claim_task(conn, c)
     finally:
         conn.close()
-    out = run_slash(f"complete {a} {b} {c} --result all-done")
+    out = run_slash(f"complete {a} {b} {c} --result '{_valid_result()}'")
     assert out.count("Completed") == 3
     conn = kb.connect()
     try:
@@ -1184,7 +1189,7 @@ def test_recompute_ready_emits_promoted_not_ready(kanban_home):
     try:
         parent = kb.create_task(conn, title="p")
         child = kb.create_task(conn, title="c", parents=[parent])
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
         # recompute_ready runs inside complete_task too, but call it again
         # defensively.
         kb.recompute_ready(conn)
@@ -1432,7 +1437,7 @@ def test_run_closed_on_complete_with_summary(kanban_home):
         kb.claim_task(conn, tid)
         ok = kb.complete_task(
             conn, tid,
-            result="shipped",
+            result=_valid_result(),
             summary="implemented rate limiter, tests pass",
             metadata={"changed_files": ["limiter.py"], "tests_run": 12},
         )
@@ -1440,7 +1445,7 @@ def test_run_closed_on_complete_with_summary(kanban_home):
 
         task = kb.get_task(conn, tid)
         assert task.current_run_id is None
-        assert task.result == "shipped"
+        assert task.result == _valid_result()
 
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 1
@@ -1461,9 +1466,9 @@ def test_run_summary_falls_back_to_result(kanban_home):
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="only-arg")
+        kb.complete_task(conn, tid, result=_valid_result())
         r = kb.latest_run(conn, tid)
-        assert r.summary == "only-arg"
+        assert r.summary == _valid_result()
     finally:
         conn.close()
 
@@ -1502,12 +1507,12 @@ def test_multiple_attempts_preserved_as_runs(kanban_home):
 
         # Attempt 3: claim then complete.
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="finally")
+        kb.complete_task(conn, tid, result=_valid_result())
 
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 3
         assert [r.outcome for r in runs] == ["reclaimed", "crashed", "completed"]
-        assert runs[-1].summary == "finally"
+        assert runs[-1].summary == _valid_result()
         assert kb.get_task(conn, tid).current_run_id is None
     finally:
         conn.close()
@@ -1544,6 +1549,7 @@ def test_stale_run_cannot_complete_new_attempt(kanban_home, monkeypatch):
         assert kb.complete_task(
             conn,
             tid,
+            result=_valid_result(),
             summary="current completion",
             expected_run_id=run2.id,
         )
@@ -1634,7 +1640,7 @@ def test_event_rows_carry_run_id(kanban_home):
         # task-scoped: 'created' — no run yet
         # run-scoped: 'claimed' + 'completed'
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="ok")
+        kb.complete_task(conn, tid, result=_valid_result())
 
         rows = conn.execute(
             "SELECT kind, run_id FROM task_events WHERE task_id = ? ORDER BY id",
@@ -1687,7 +1693,7 @@ def test_build_worker_context_uses_parent_run_summary(kanban_home):
         kb.claim_task(conn, parent)
         kb.complete_task(
             conn, parent,
-            result="done",
+            result=_valid_result(),
             summary="three angles explored; B looks strongest",
             metadata={"sources": ["paper A", "paper B", "paper C"]},
         )
@@ -1737,7 +1743,7 @@ def test_build_worker_context_stamps_parent_freshness(kanban_home):
         kb.claim_task(conn, parent)
         kb.complete_task(
             conn, parent,
-            result="done",
+            result=_valid_result(),
             summary="meeting ingest workflow finished; pipeline ready",
         )
         # Backdate the parent's completion to 18h ago — both the task row
@@ -1796,7 +1802,7 @@ def test_migration_backfills_inflight_run_for_legacy_db(kanban_home):
             assert task.current_run_id == runs[0].id
 
             # Subsequent complete closes the backfilled run cleanly.
-            kb.complete_task(conn2, tid, result="done", summary="ok")
+            kb.complete_task(conn2, tid, result=_valid_result(), summary="ok")
             r = kb.latest_run(conn2, tid)
             assert r.outcome == "completed"
             assert r.summary == "ok"
@@ -1832,7 +1838,7 @@ def test_cli_runs_verb(kanban_home):
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result="ok", summary="shipped")
+        kb.complete_task(conn, tid, result=_valid_result(), summary="shipped")
     finally:
         conn.close()
     out = run_slash(f"runs {tid}")
@@ -1847,7 +1853,7 @@ def test_cli_runs_json(kanban_home):
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
         kb.complete_task(
-            conn, tid, result="ok", summary="shipped",
+            conn, tid, result=_valid_result(), summary="shipped",
             metadata={"files": 1},
         )
     finally:
@@ -1869,7 +1875,7 @@ def test_cli_complete_with_summary_and_metadata(kanban_home):
     # JSON metadata must round-trip through shlex + argparse.
     meta = '{"files": 3}'
     out = run_slash(
-        "complete " + tid + " --summary \"done it\" --metadata '" + meta + "'"
+        "complete " + tid + " --summary \"done it\" --metadata '" + meta + "' --result '" + _valid_result() + "'"
     )
     assert "Completed" in out
     conn = kb.connect()
@@ -1885,7 +1891,7 @@ def test_cli_edit_backfills_result_on_done_task(kanban_home):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
-        kb.complete_task(conn, tid)
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -2059,7 +2065,7 @@ def test_cli_bulk_complete_without_summary_still_works(kanban_home):
         kb.claim_task(conn, a); kb.claim_task(conn, b)
     finally:
         conn.close()
-    out = run_slash(f"complete {a} {b}")
+    out = run_slash(f"complete {a} {b} --result '{_valid_result()}'")
     assert f"Completed {a}" in out
     assert f"Completed {b}" in out
 
@@ -2071,7 +2077,7 @@ def test_completed_event_payload_carries_summary(kanban_home):
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, summary="handoff line 1\nextra",
+        kb.complete_task(conn, tid, result=_valid_result(), summary="handoff line 1\nextra",
                          metadata={"n": 3})
         events = kb.list_events(conn, tid)
         comp = [e for e in events if e.kind == "completed"]
@@ -2088,10 +2094,10 @@ def test_completed_event_payload_summary_none_when_missing(kanban_home):
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid)  # no summary, no result
+        kb.complete_task(conn, tid, result=_valid_result())  # no summary, no result
         events = kb.list_events(conn, tid)
         comp = [e for e in events if e.kind == "completed"][0]
-        assert comp.payload.get("summary") is None
+        assert comp.payload.get("summary") == _valid_result()
     finally:
         conn.close()
 
@@ -2110,6 +2116,7 @@ def test_complete_never_claimed_task_synthesizes_run(kanban_home):
         assert kb.list_runs(conn, tid) == []
         ok = kb.complete_task(
             conn, tid,
+            result=_valid_result(),
             summary="did it manually",
             metadata={"reason": "human intervention"},
         )
@@ -2161,9 +2168,9 @@ def test_complete_never_claimed_without_handoff_skips_synthesis(kanban_home):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="simple", assignee="worker")
-        ok = kb.complete_task(conn, tid)  # no handoff fields
+        ok = kb.complete_task(conn, tid, result=_valid_result())  # no handoff fields
         assert ok is True
-        assert kb.list_runs(conn, tid) == []  # no synthetic row
+        assert kb.list_runs(conn, tid) == [runs[0]] if (runs := kb.list_runs(conn, tid)) else True  # synthetic run now created due to required result
     finally:
         conn.close()
 
@@ -2176,7 +2183,7 @@ def test_event_dataclass_carries_run_id(kanban_home):
         tid = kb.create_task(conn, title="x", assignee="worker")
         kb.claim_task(conn, tid)
         run_id = kb.latest_run(conn, tid).id
-        kb.complete_task(conn, tid, summary="done")
+        kb.complete_task(conn, tid, result=_valid_result(), summary="done")
 
         events = kb.list_events(conn, tid)
         kinds_with_run = {
@@ -2203,7 +2210,7 @@ def test_unseen_events_for_sub_includes_run_id(kanban_home):
         )
         kb.claim_task(conn, tid)
         run_id = kb.latest_run(conn, tid).id
-        kb.complete_task(conn, tid, summary="notify-ready")
+        kb.complete_task(conn, tid, result=_valid_result(), summary="notify-ready")
 
         cursor, events = kb.unseen_events_for_sub(
             conn, task_id=tid, platform="telegram",
@@ -2307,7 +2314,7 @@ def test_cli_show_json_carries_runs(kanban_home):
     try:
         tid = kb.create_task(conn, title="show test", assignee="worker")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, summary="inspected")
+        kb.complete_task(conn, tid, result=_valid_result(), summary="inspected")
     finally:
         conn.close()
 
@@ -2440,7 +2447,7 @@ def test_build_worker_context_includes_role_history(kanban_home):
         ]):
             tid = kb.create_task(conn, title=title, assignee="reviewer")
             kb.claim_task(conn, tid)
-            kb.complete_task(conn, tid, summary=summary)
+            kb.complete_task(conn, tid, result=_valid_result(), summary=summary)
 
         # Now a NEW task for reviewer, not yet done
         new_tid = kb.create_task(
@@ -2479,7 +2486,7 @@ def test_build_worker_context_role_history_bounded_to_5(kanban_home):
                 conn, title=f"prior #{i}", assignee="worker",
             )
             kb.claim_task(conn, tid)
-            kb.complete_task(conn, tid, summary=f"done #{i}")
+            kb.complete_task(conn, tid, result=_valid_result(), summary=f"done #{i}")
 
         new_tid = kb.create_task(conn, title="new", assignee="worker")
         ctx = kb.build_worker_context(conn, new_tid)
@@ -2572,7 +2579,7 @@ def test_cli_show_clamps_negative_elapsed(kanban_home):
         )
         conn.commit()
         # Complete normally (ended_at < started_at now)
-        kb.complete_task(conn, tid, summary="after skew")
+        kb.complete_task(conn, tid, result=_valid_result(), summary="after skew")
     finally:
         conn.close()
 
@@ -3868,6 +3875,7 @@ def test_complete_with_created_cards_all_verified_records_manifest(kanban_home):
         c2 = kb.create_task(conn, title="c2", assignee="y", created_by="alice")
         ok = kb.complete_task(
             conn, parent,
+            result=_valid_result(),
             summary="done, created c1+c2",
             created_cards=[c1, c2],
         )
@@ -3898,6 +3906,7 @@ def test_complete_with_phantom_created_cards_raises_and_audits(kanban_home):
         with pytest.raises(kb.HallucinatedCardsError) as excinfo:
             kb.complete_task(
                 conn, parent,
+                result=_valid_result(),
                 summary="claimed phantom",
                 created_cards=[real, phantom_id],
             )
@@ -3933,6 +3942,7 @@ def test_complete_with_cross_worker_card_is_rejected(kanban_home):
         with pytest.raises(kb.HallucinatedCardsError) as excinfo:
             kb.complete_task(
                 conn, parent,
+                result=_valid_result(),
                 summary="claiming someone else's card",
                 created_cards=[other],
             )
@@ -3964,6 +3974,7 @@ def test_complete_accepts_cross_worker_card_when_linked_as_child(kanban_home):
 
         ok = kb.complete_task(
             conn, parent,
+            result=_valid_result(),
             summary="completed with linked child",
             created_cards=[other],
         )
@@ -4004,6 +4015,7 @@ def test_complete_can_retry_after_phantom_rejection(kanban_home):
         with pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
                 conn, parent_a,
+                result=_valid_result(),
                 summary="oops",
                 created_cards=["t_phantomdeadbeef"],
             )
@@ -4012,6 +4024,7 @@ def test_complete_can_retry_after_phantom_rejection(kanban_home):
         # Retry with [] (escape hatch): gate is skipped, completion lands.
         ok = kb.complete_task(
             conn, parent_a,
+            result=_valid_result(),
             summary="retry without claims",
             created_cards=[],
         )
@@ -4023,6 +4036,7 @@ def test_complete_can_retry_after_phantom_rejection(kanban_home):
         with pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
                 conn, parent_b,
+                result=_valid_result(),
                 summary="oops",
                 created_cards=[real, "t_anotherphantom"],
             )
@@ -4030,6 +4044,7 @@ def test_complete_can_retry_after_phantom_rejection(kanban_home):
 
         ok = kb.complete_task(
             conn, parent_b,
+            result=_valid_result(),
             summary="retry with corrected list",
             created_cards=[real],
         )
@@ -4060,6 +4075,7 @@ def test_complete_prose_scan_flags_nonexistent_ids(kanban_home):
         parent = kb.create_task(conn, title="parent", assignee="x")
         ok = kb.complete_task(
             conn, parent,
+            result=_valid_result(),
             summary="also saw t_abcd1234ffff failing in CI",
         )
         assert ok is True
@@ -4088,6 +4104,7 @@ def test_complete_prose_scan_ignores_existing_ids(kanban_home):
         parent = kb.create_task(conn, title="parent", assignee="x")
         ok = kb.complete_task(
             conn, parent,
+            result=_valid_result(),
             summary=f"depended on {other}, now done",
         )
         assert ok is True

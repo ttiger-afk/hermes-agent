@@ -145,6 +145,7 @@ def create_swarm(
     kb.complete_task(
         conn,
         root,
+        result='{"ok":true}',
         summary="Swarm topology planned; root remains the shared blackboard.",
         metadata={
             "kind": "kanban_swarm_v1",
