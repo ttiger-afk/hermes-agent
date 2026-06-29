@@ -17,6 +17,11 @@ import pytest
 from hermes_cli import kanban_db as kb
 
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     """Isolated HERMES_HOME with an empty kanban DB."""
@@ -286,7 +291,7 @@ def test_link_demotes_ready_child_to_todo_when_parent_not_done(kanban_home):
 def test_link_keeps_ready_child_when_parent_already_done(kanban_home):
     with kb.connect() as conn:
         a = kb.create_task(conn, title="a")
-        kb.complete_task(conn, a)
+        kb.complete_task(conn, a, result=_valid_result())
         b = kb.create_task(conn, title="b")
         assert kb.get_task(conn, b).status == "ready"
         kb.link_tasks(conn, a, b)
@@ -318,9 +323,9 @@ def test_recompute_ready_cascades_through_chain(kanban_home):
         c = kb.create_task(conn, title="c", parents=[b])
         assert [kb.get_task(conn, x).status for x in (a, b, c)] == \
                ["ready", "todo", "todo"]
-        kb.complete_task(conn, a)
+        kb.complete_task(conn, a, result=_valid_result())
         assert kb.get_task(conn, b).status == "ready"
-        kb.complete_task(conn, b)
+        kb.complete_task(conn, b, result=_valid_result())
         assert kb.get_task(conn, c).status == "ready"
 
 
@@ -358,9 +363,9 @@ def test_recompute_ready_fan_in_waits_for_all_parents(kanban_home):
         a = kb.create_task(conn, title="a")
         b = kb.create_task(conn, title="b")
         c = kb.create_task(conn, title="c", parents=[a, b])
-        kb.complete_task(conn, a)
+        kb.complete_task(conn, a, result=_valid_result())
         assert kb.get_task(conn, c).status == "todo"
-        kb.complete_task(conn, b)
+        kb.complete_task(conn, b, result=_valid_result())
         assert kb.get_task(conn, c).status == "ready"
 
 
@@ -419,7 +424,7 @@ def test_unblock_scheduled_rechecks_parent_gate(kanban_home):
         assert kb.unblock_task(conn, child) is True
         assert kb.get_task(conn, child).status == "todo"
 
-        kb.complete_task(conn, parent)
+        kb.complete_task(conn, parent, result=_valid_result())
         assert kb.schedule_task(conn, child, reason="second timer") is True
         assert kb.unblock_task(conn, child) is True
         assert kb.get_task(conn, child).status == "ready"
@@ -1214,7 +1219,7 @@ def test_recompute_ready_skips_tasks_at_failure_limit(kanban_home):
                                parents=[parent])
         # Complete the parent so the child's dependencies are satisfied.
         kb.claim_task(conn, parent)
-        kb.complete_task(conn, parent, summary="done")
+        kb.complete_task(conn, parent, summary="done", result=_valid_result())
 
         # Simulate the child having exhausted its budget twice,
         # hitting the default failure limit (2).
@@ -1493,7 +1498,7 @@ def test_list_tasks_assignee_filter_case_insensitive(kanban_home):
 def test_archive_hides_from_default_list(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")
-        kb.complete_task(conn, t)
+        kb.complete_task(conn, t, result=_valid_result())
         assert kb.archive_task(conn, t)
         assert len(kb.list_tasks(conn)) == 0
         assert len(kb.list_tasks(conn, include_archived=True)) == 1
@@ -1719,7 +1724,7 @@ def test_dispatch_promotes_ready_and_spawns(kanban_home, all_assignees_spawnable
         p = kb.create_task(conn, title="p", assignee="alice")
         c = kb.create_task(conn, title="c", assignee="bob", parents=[p])
         # Finish parent outside dispatch; promotion happens inside.
-        kb.complete_task(conn, p)
+        kb.complete_task(conn, p, result=_valid_result())
         res = kb.dispatch_once(conn, spawn_fn=fake_spawn)
     # Spawned c (a was already done when dispatch was called).
     assert len(spawns) == 1
@@ -2589,7 +2594,7 @@ def test_list_runs_state_filter_requires_pair_and_valid_type(kanban_home):
 def test_list_runs_filters_by_outcome_value(kanban_home):
     with kb.connect() as conn:
         tid = kb.create_task(conn, title="t", assignee="alice")
-        kb.complete_task(conn, tid, summary="ok")
+        kb.complete_task(conn, tid, summary="ok", result=_valid_result())
         matching = kb.list_runs(conn, tid, state_type="outcome", state_name="completed")
         empty = kb.list_runs(conn, tid, state_type="outcome", state_name="blocked")
     assert matching
@@ -2971,7 +2976,7 @@ def test_latest_summary_returns_summary_after_complete(kanban_home):
     handoff = "shipped 3 files, ran tests, opened PR #42"
     with kb.connect() as conn:
         t = kb.create_task(conn, title="work", assignee="alice")
-        kb.complete_task(conn, t, summary=handoff)
+        kb.complete_task(conn, t, summary=handoff, result=_valid_result())
         assert kb.latest_summary(conn, t) == handoff
 
 
@@ -2982,7 +2987,7 @@ def test_latest_summary_picks_newest_when_multiple_runs(kanban_home):
     summary surfaces."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="retry", assignee="alice")
-        kb.complete_task(conn, t, summary="first attempt")
+        kb.complete_task(conn, t, summary="first attempt", result=_valid_result())
         # Move back to ready by direct SQL — block_task / unblock_task
         # paths require an active claim, but we just want a second run
         # row to exist with a later ended_at.
@@ -2993,7 +2998,7 @@ def test_latest_summary_picks_newest_when_multiple_runs(kanban_home):
         # Sleep 1s so the second run's ended_at is provably later than
         # the first (complete_task uses int(time.time())).
         time.sleep(1.05)
-        kb.complete_task(conn, t, summary="second attempt — final")
+        kb.complete_task(conn, t, summary="second attempt — final", result=_valid_result())
         assert kb.latest_summary(conn, t) == "second attempt — final"
 
 
@@ -3002,7 +3007,7 @@ def test_latest_summary_skips_empty_string(kanban_home):
     populated one — empty strings carry no information."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="t", assignee="alice")
-        kb.complete_task(conn, t, summary="real handoff")
+        kb.complete_task(conn, t, summary="real handoff", result=_valid_result())
         # Inject a later run with empty summary directly. Workers
         # writing "" instead of None is a real shape we want to ignore.
         conn.execute(
@@ -3022,8 +3027,8 @@ def test_latest_summaries_batch_omits_tasks_without_summary(kanban_home):
         t1 = kb.create_task(conn, title="a", assignee="alice")
         t2 = kb.create_task(conn, title="b", assignee="bob")
         t3 = kb.create_task(conn, title="c", assignee="carol")
-        kb.complete_task(conn, t1, summary="alpha")
-        kb.complete_task(conn, t3, summary="charlie")
+        kb.complete_task(conn, t1, summary="alpha", result=_valid_result())
+        kb.complete_task(conn, t3, summary="charlie", result=_valid_result())
         out = kb.latest_summaries(conn, [t1, t2, t3])
         assert out == {t1: "alpha", t3: "charlie"}
         # Empty input → empty dict, no SQL syntax error from "IN ()".
@@ -3109,7 +3114,7 @@ def test_unlink_tasks_triggers_recompute_ready(kanban_home):
     with kb.connect() as conn:
         # A is done.
         a = kb.create_task(conn, title="parent-done")
-        kb.complete_task(conn, a)
+        kb.complete_task(conn, a, result=_valid_result())
 
         # C is running (not done) — blocks child B.
         c = kb.create_task(conn, title="parent-running")
