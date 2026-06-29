@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,7 @@ def test_missing_result_does_not_autogenerate_from_summary(kanban_home):
         ok = kb.complete_task(conn, tid, result=None, summary="This should not become a result")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
         # Verify no auto-generated _auto key
         assert t.result is None
@@ -68,6 +70,7 @@ def test_summary_only_completion_is_rejected(kanban_home):
         ok = kb.complete_task(conn, tid, summary="Just a summary, no result")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
 
 
@@ -83,6 +86,7 @@ def test_null_result_never_marks_done(kanban_home):
         ok = kb.complete_task(conn, tid, result=None)
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status == "running"  # stays retryable
 
 
@@ -98,6 +102,7 @@ def test_empty_result_never_marks_done(kanban_home):
         ok = kb.complete_task(conn, tid, result="")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
 
 
@@ -109,6 +114,7 @@ def test_whitespace_result_never_marks_done(kanban_home):
         ok = kb.complete_task(conn, tid, result="   \n  \t  ")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
 
 
@@ -124,6 +130,7 @@ def test_empty_object_never_marks_done(kanban_home):
         ok = kb.complete_task(conn, tid, result="{}")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
 
 
@@ -139,6 +146,7 @@ def test_invalid_json_never_marks_done(kanban_home):
         ok = kb.complete_task(conn, tid, result="not json at all !!!")
         assert ok is False
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status != "done"
 
 
@@ -158,6 +166,7 @@ def test_all_done_writers_use_complete_task(kanban_home):
         ok = kb.complete_task(conn, tid, result=result, summary="all good")
         assert ok is True
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status == "done"
         assert t.result is not None
         assert t.result_sha256 is not None
@@ -176,6 +185,7 @@ def test_result_and_hash_written_atomically(kanban_home):
         ok = kb.complete_task(conn, tid, result=result_json)
         assert ok is True
         t = kb.get_task(conn, tid)
+        assert t is not None
         assert t.status == "done"
         assert t.result == result_json
         assert t.result_sha256 is not None
@@ -203,6 +213,7 @@ def test_unicode_result_hash_matches_canonical_rule(kanban_home):
         conn.commit()
         # Confirm status is still running (not done)
         task = kb.get_task(conn, tid)
+        assert task is not None
         assert task.status == "running", "task must remain retryable"
         assert task.result is None, "no result until proper completion"
 
@@ -264,6 +275,7 @@ def test_real_commit_failure_is_retryable(kanban_home, monkeypatch):
 
         # Verify the task did NOT transition to done
         task = kb.get_task(conn, tid)
+        assert task is not None
         assert task.status != "done", (
             f"status={task.status}, expected != done after real commit failure"
         )
