@@ -7,6 +7,11 @@ from gateway.run import GatewayRunner
 from hermes_cli import kanban_db as kb
 
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
+
 class RecordingAdapter:
     def __init__(self):
         self.sent = []
@@ -48,7 +53,7 @@ def _create_completed_subscription(summary="done once"):
     try:
         tid = kb.create_task(conn, title="notify once", assignee="worker")
         kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat-1")
-        kb.complete_task(conn, tid, summary=summary)
+        kb.complete_task(conn, tid, summary=summary, result=_valid_result())
         return tid
     finally:
         conn.close()

@@ -1,10 +1,16 @@
 import asyncio
+import json
 import pytest
 
 from pathlib import Path
 from types import SimpleNamespace
 from hermes_cli import kanban_db as kb
 from unittest.mock import AsyncMock, MagicMock, patch
+
+
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +45,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
     try:
         tid = kb.create_task(conn, title="test task", assignee="worker1")
         kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
-        kb.complete_task(conn, tid, result="completed by agent")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -347,7 +353,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
             chat_id="chat1",
             notifier_profile="default",
         )
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -403,7 +409,7 @@ async def test_notifier_delivers_subscription_owned_by_current_profile(kanban_ho
             chat_id="chat1",
             notifier_profile="default",
         )
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
