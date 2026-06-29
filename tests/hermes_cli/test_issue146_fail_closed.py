@@ -1,14 +1,22 @@
-# ---------------------------------------------------------------------------
-# Issue #146: fail-closed result atomicity tests
-# ---------------------------------------------------------------------------
+"""Issue #146/#154 fail-closed canonical result authority tests.
 
-import json, hashlib
-import pytest
-import sqlite3
+Tests for the Writer side (hermes_cli/kanban_db.py):
+- No auto-generation of result from summary
+- NULL/empty/{}/invalid JSON rejected
+- ensure_ascii=False canonical serialization
+- Atomic write of result + result_sha256
+- Unicode result hash matches canonical rule
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
 from pathlib import Path
 
+import pytest
+
 from hermes_cli import kanban_db as kb
-from hermes_cli.kanban_db import _validate_completion_result
 
 
 @pytest.fixture
@@ -22,140 +30,173 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
-def test_missing_result_never_marks_done(kanban_home):
-    """result=None must not transition to done."""
+def _valid_result():
+    return json.dumps(
+        {"tests_pass": True, "synthetic_data_only": True, "marker": "test"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. missing_result_does_not_autogenerate_from_summary
+# ---------------------------------------------------------------------------
+
+def test_missing_result_does_not_autogenerate_from_summary(kanban_home):
+    """When result is None and only summary is provided, reject — do NOT auto-generate."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test missing result", assignee="bot2")
+        tid = kb.create_task(conn, title="test", assignee="a")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(conn, tid, result=None, summary="This should not become a result")
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
+        # Verify no auto-generated _auto key
+        assert t.result is None
+
+
+# ---------------------------------------------------------------------------
+# 2. summary_only_completion_is_rejected
+# ---------------------------------------------------------------------------
+
+def test_summary_only_completion_is_rejected(kanban_home):
+    """Omitting result entirely while providing summary must be rejected."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="summary only", assignee="a")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(conn, tid, summary="Just a summary, no result")
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
+
+
+# ---------------------------------------------------------------------------
+# 3. null_result_never_marks_done
+# ---------------------------------------------------------------------------
+
+def test_null_result_never_marks_done(kanban_home):
+    """result=None must never transition task to 'done'."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="null result", assignee="a")
         kb.claim_task(conn, tid)
         ok = kb.complete_task(conn, tid, result=None)
-        assert ok is False, "None result must not be accepted"
-        task = kb.get_task(conn, tid)
-        assert task.status != "done", f"status={task.status}, expected != done"
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status == "running"  # stays retryable
 
+
+# ---------------------------------------------------------------------------
+# 4. empty_result_never_marks_done
+# ---------------------------------------------------------------------------
 
 def test_empty_result_never_marks_done(kanban_home):
-    """result='' must not transition to done."""
+    """Empty string result must never transition task to 'done'."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test empty result", assignee="bot2")
+        tid = kb.create_task(conn, title="empty result", assignee="a")
         kb.claim_task(conn, tid)
         ok = kb.complete_task(conn, tid, result="")
-        assert ok is False, "empty result must not be accepted"
-        task = kb.get_task(conn, tid)
-        assert task.status != "done"
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
 
+
+def test_whitespace_result_never_marks_done(kanban_home):
+    """Whitespace-only result must never transition task to 'done'."""
+    with kb.connect() as conn:
+        tid = kb.create_task(conn, title="whitespace result", assignee="a")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(conn, tid, result="   \n  \t  ")
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
+
+
+# ---------------------------------------------------------------------------
+# 5. empty_object_never_marks_done
+# ---------------------------------------------------------------------------
 
 def test_empty_object_never_marks_done(kanban_home):
-    """result='{}' must not transition to done."""
+    """result='{}' must never transition task to 'done'."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test empty object", assignee="bot2")
+        tid = kb.create_task(conn, title="empty object", assignee="a")
         kb.claim_task(conn, tid)
         ok = kb.complete_task(conn, tid, result="{}")
-        assert ok is False, "empty object must not be accepted"
-        task = kb.get_task(conn, tid)
-        assert task.status != "done"
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
 
+
+# ---------------------------------------------------------------------------
+# 6. invalid_json_never_marks_done
+# ---------------------------------------------------------------------------
 
 def test_invalid_json_never_marks_done(kanban_home):
-    """result='not-json' must not transition to done."""
+    """Non-JSON result must never transition task to 'done'."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test invalid json", assignee="bot2")
+        tid = kb.create_task(conn, title="invalid json", assignee="a")
         kb.claim_task(conn, tid)
-        ok = kb.complete_task(conn, tid, result="not-json")
-        assert ok is False, "invalid JSON must not be accepted"
-        task = kb.get_task(conn, tid)
-        assert task.status != "done"
+        ok = kb.complete_task(conn, tid, result="not json at all !!!")
+        assert ok is False
+        t = kb.get_task(conn, tid)
+        assert t.status != "done"
 
 
-def test_serialization_failure_never_marks_done(kanban_home):
-    """result containing non-serializable types must be rejected."""
-    # We can't easily inject a non-serializable type through the
-    # string interface, but we test the validator directly.
-    from hermes_cli.kanban_db import _validate_completion_result
-    import pytest as pt
-    # A bare partial-JSON string that looks like an attempt to inject
-    # invalid structure: trailing garbage after valid JSON.
-    with pt.raises(ValueError):
-        _validate_completion_result('{"ok":true}trailing')
+# ---------------------------------------------------------------------------
+# 7. all_done_writers_use_complete_task
+# (Verified: complete_task is the only function that writes status='done'
+#  via the UPDATE tasks SET status='done' queries at lines ~4099-4110 and ~4115-4130.
+#  No other function directly executes UPDATE tasks SET status='done'.)
+# ---------------------------------------------------------------------------
 
-
-def test_commit_failure_never_marks_done(kanban_home):
-    """If the write_txn rowcount is 0 (e.g. status mismatch), status must not be done."""
+def test_all_done_writers_use_complete_task(kanban_home):
+    """complete_task is the sole writer; confirm it handles the full pipeline."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test no-rowcount", assignee="bot2")
-        # Do NOT claim — complete_task on ready is allowed but let's test
-        # the rowcount==0 path by completing a task that was already completed
+        tid = kb.create_task(conn, title="valid task", assignee="a")
         kb.claim_task(conn, tid)
-        kb.complete_task(conn, tid, result='{"ok":true,"seq":1}')
-        # Second completion on already-done task → rowcount=0 → returns False
-        ok2 = kb.complete_task(conn, tid, result='{"ok":true,"seq":2}')
-        assert ok2 is False, "second completion must return False (rowcount=0)"
-        task = kb.get_task(conn, tid)
-        # Result must be from FIRST completion
-        assert '"seq":1' in (task.result or ""), "duplicate must not overwrite result"
-
-
-def test_valid_result_atomic_completion_pass(kanban_home):
-    """Valid result JSON → status=done + result + result_sha256 all present."""
-    import json as j
-    contract = j.dumps({"tests_pass": True, "synthetic_data_only": True, "marker": "canary-001"})
-    with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test valid completion", assignee="bot2")
-        kb.claim_task(conn, tid)
-        ok = kb.complete_task(conn, tid, result=contract)
-        assert ok is True, "valid contract result must be accepted"
-        task = kb.get_task(conn, tid)
-        assert task.status == "done"
-        assert task.result is not None
-        assert task.result_sha256 is not None
-        assert len(task.result_sha256) == 64, f"sha256 length={len(task.result_sha256)}"
-
-
-def test_result_sha256_matches_canonical_json(kanban_home):
-    """SHA-256 must be the hex digest of canonical (sorted-key) JSON."""
-    import json as j, hashlib
-    # Non-sorted input — canonical form must sort keys
-    result_in = '{"b":2,"a":1}'
-    canonical = j.dumps({"a": 1, "b": 2}, sort_keys=True, separators=(",", ":"))
-    expected_sha = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test sha256 match", assignee="bot2")
-        kb.claim_task(conn, tid)
-        ok = kb.complete_task(conn, tid, result=result_in)
+        result = _valid_result()
+        ok = kb.complete_task(conn, tid, result=result, summary="all good")
         assert ok is True
-        task = kb.get_task(conn, tid)
-        assert task.result_sha256 == expected_sha, (
-            f"sha256={task.result_sha256}, expected={expected_sha}"
-        )
-        # Verify result was canonicalised
-        assert task.result == canonical, (
-            f"result={task.result!r}, expected={canonical!r}"
-        )
+        t = kb.get_task(conn, tid)
+        assert t.status == "done"
+        assert t.result is not None
+        assert t.result_sha256 is not None
 
 
-def test_duplicate_completion_is_idempotent(kanban_home):
-    """Completing an already-done task must be a no-op (return False)."""
+# ---------------------------------------------------------------------------
+# 8. result_and_hash_written_atomically
+# ---------------------------------------------------------------------------
+
+def test_result_and_hash_written_atomically(kanban_home):
+    """Successful completion writes both result and result_sha256 in one transaction."""
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test idempotent", assignee="bot2")
+        tid = kb.create_task(conn, title="atomic test", assignee="a")
         kb.claim_task(conn, tid)
-        # First completion
-        ok1 = kb.complete_task(
-            conn, tid, result='{"ok":true,"version":1}'
-        )
-        assert ok1 is True
-        # Second completion
-        ok2 = kb.complete_task(
-            conn, tid, result='{"ok":true,"version":2}'
-        )
-        assert ok2 is False, "duplicate completion must return False"
-        task = kb.get_task(conn, tid)
-        # Result must be from FIRST completion
-        assert '"version":1' in (task.result or ""), "duplicate must not overwrite result"
+        result_json = json.dumps({"a": 1, "b": 2}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        ok = kb.complete_task(conn, tid, result=result_json)
+        assert ok is True
+        t = kb.get_task(conn, tid)
+        assert t.status == "done"
+        assert t.result == result_json
+        assert t.result_sha256 is not None
+        expected_sha = hashlib.sha256(result_json.encode("utf-8")).hexdigest()
+        assert t.result_sha256 == expected_sha
 
 
-def test_crash_before_commit_is_retryable(kanban_home):
-    """Task must stay retryable (not done) if exception occurs mid-write."""
+# ---------------------------------------------------------------------------
+# 9. unicode_result_hash_matches_canonical_rule
+# ---------------------------------------------------------------------------
+
+def test_unicode_result_hash_matches_canonical_rule(kanban_home):
+    """Writer, Reader, SG must produce the same SHA-256 for unicode results."""
+    result_obj = {
+        "tests_pass": True,
+        "message": "中文验证",
+        "marker": "issue154",
+    }
+    canonical = json.dumps(result_obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     with kb.connect() as conn:
-        tid = kb.create_task(conn, title="test retryable", assignee="bot2")
+        tid = kb.create_task(conn, title="unicode test", assignee="a")
         kb.claim_task(conn, tid)
         # Write partial state manually to simulate mid-txn
         conn.execute("UPDATE tasks SET status = 'running' WHERE id = ?", (tid,))

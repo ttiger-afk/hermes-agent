@@ -3956,7 +3956,7 @@ def _canonical_result_sha256(result: str) -> str:
     """
     try:
         parsed = json.loads(result)
-        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (json.JSONDecodeError, TypeError, UnicodeError):
         # Non-JSON result: hash the raw string (best-effort)
         canonical = result.encode("utf-8")
@@ -3998,7 +3998,7 @@ def _validate_completion_result(result: Optional[str]) -> str:
         raise ValueError(f"result is not valid JSON: {e}")
     # Serialization round-trip: encode back to canonical form.
     try:
-        canonical = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+        canonical = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError) as e:
         raise ValueError(f"result JSON serialization failed: {e}")
     return canonical
