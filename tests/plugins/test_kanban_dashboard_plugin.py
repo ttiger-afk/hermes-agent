@@ -1219,7 +1219,7 @@ def test_task_detail_includes_runs(client):
         _kb.claim_task(conn, tid)
         _kb.complete_task(
             conn, tid,
-            result="done",
+            result='{"ok":true}',  # Issue #146: result must be valid JSON
             summary="tested on rate limiter",
             metadata={"changed_files": ["limiter.py"]},
         )
@@ -1262,6 +1262,7 @@ def test_patch_status_done_with_summary_and_metadata(client):
         f"/api/plugins/kanban/tasks/{tid}",
         json={
             "status": "done",
+            "result": '{"ok":true}',  # Issue #146: result must be valid JSON
             "summary": "shipped the thing",
             "metadata": {"changed_files": ["a.py", "b.py"], "tests_run": 7},
         },
@@ -1291,14 +1292,14 @@ def test_patch_status_done_without_summary_still_works(client):
         conn.close()
     r = client.patch(
         f"/api/plugins/kanban/tasks/{tid}",
-        json={"status": "done", "result": "legacy shape"},
+        json={"status": "done", "result": '{"ok":true,"note":"legacy shape"}'},
     )
     assert r.status_code == 200, r.text
     conn = kb.connect()
     try:
         run = kb.latest_run(conn, tid)
         assert run.outcome == "completed"
-        assert run.summary == "legacy shape"  # falls back to result
+        assert "legacy shape" in (run.summary or "")  # result is now JSON
     finally:
         conn.close()
 
@@ -1339,7 +1340,7 @@ def test_event_dict_includes_run_id(client):
     try:
         kb.claim_task(conn, tid)
         run_id = kb.latest_run(conn, tid).id
-        kb.complete_task(conn, tid, summary="wss")
+        kb.complete_task(conn, tid, result='{"ok":true}', summary="wss")  # Issue #146: result must be valid JSON
     finally:
         conn.close()
 
