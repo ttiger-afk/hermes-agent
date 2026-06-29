@@ -4076,11 +4076,18 @@ def complete_task(
 
     # --- result validation (fail-closed, Issue #146) ---
     # Validate AND canonicalise the result BEFORE entering the write
-    # transaction.  Only enforced for worker-driven completions (where
-    # expected_run_id is set).  Manual CLI completions (expected_run_id
-    # is None) skip validation so operators can close tasks without
-    # providing a JSON result.
-    if expected_run_id is not None:
+    # transaction.  Enforced for worker-driven completions (where
+    # expected_run_id is set) AND for any task currently in 'running'
+    # state (claimed by a worker).  Manual CLI/dashboard completions of
+    # non-running tasks (ready/blocked) skip validation.
+    task_row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    is_worker_completion = (
+        expected_run_id is not None
+        or (task_row is not None and task_row["status"] == "running")
+    )
+    if is_worker_completion:
         try:
             result = _validate_completion_result(result)
         except ValueError as exc:
