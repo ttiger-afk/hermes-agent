@@ -4044,31 +4044,14 @@ def complete_task(
     """
     now = int(time.time())
 
-    # --- result validation (fail-closed, Issue #146) ---
-    # Validate AND canonicalise the result BEFORE entering the write
-    # transaction.  If validation fails we emit an auditable event in
-    # its own txn and return False — the task stays retryable.
-    try:
-        result = _validate_completion_result(result)
-    except ValueError as exc:
-        with write_txn(conn):
-            _append_event(
-                conn, task_id, "completion_blocked_invalid_result",
-                {
-                    "error": str(exc),
-                    "result_preview": (
-                        (result or "").strip()[:400] if result else None
-                    ),
-                },
-            )
-        return False
-    result_sha256 = _canonical_result_sha256(result)
-
-    # Gate: verify created_cards BEFORE the main write txn. A rejected
+    # Gate 1: verify created_cards BEFORE any state mutation. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
     # surfacing HallucinatedCardsError to the worker; this function
     # never mutates task state on a phantom-card rejection.
+    # This runs BEFORE result validation so workers always get the
+    # most actionable error (phantom card IDs) rather than a cryptic
+    # "result must not be None" message. See #22923 / Issue #146.
     if created_cards:
         verified_cards, phantom_cards = _verify_created_cards(
             conn, task_id, created_cards
@@ -4093,23 +4076,26 @@ def complete_task(
 
     # --- result validation (fail-closed, Issue #146) ---
     # Validate AND canonicalise the result BEFORE entering the write
-    # transaction.  If validation fails we emit an auditable event in
-    # its own txn and return False — the task stays retryable.
-    try:
-        result = _validate_completion_result(result)
-    except ValueError as exc:
-        with write_txn(conn):
-            _append_event(
-                conn, task_id, "completion_blocked_invalid_result",
-                {
-                    "error": str(exc),
-                    "result_preview": (
-                        (result or "").strip()[:400] if result else None
-                    ),
-                },
-            )
-        return False
-    result_sha256 = _canonical_result_sha256(result)
+    # transaction.  Only enforced for worker-driven completions (where
+    # expected_run_id is set).  Manual CLI completions (expected_run_id
+    # is None) skip validation so operators can close tasks without
+    # providing a JSON result.
+    if expected_run_id is not None:
+        try:
+            result = _validate_completion_result(result)
+        except ValueError as exc:
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "completion_blocked_invalid_result",
+                    {
+                        "error": str(exc),
+                        "result_preview": (
+                            (result or "").strip()[:400] if result else None
+                        ),
+                    },
+                )
+            return False
+    result_sha256 = _canonical_result_sha256(result) if result else None
 
     # --- atomic completion write ---
     with write_txn(conn):
