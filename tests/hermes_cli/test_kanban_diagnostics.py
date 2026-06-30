@@ -15,6 +15,11 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
 from hermes_cli import kanban_diagnostics as kd
 
 
@@ -400,6 +405,7 @@ def test_engine_works_on_sqlite_row_objects(kanban_home):
         with pytest.raises(kb.HallucinatedCardsError):
             kb.complete_task(
                 conn, parent,
+                result=_valid_result(),
                 summary="with phantom", created_cards=[real, "t_deadbeef1"],
             )
         # Pull Row objects the way the API helper does.

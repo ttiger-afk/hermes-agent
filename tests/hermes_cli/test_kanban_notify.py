@@ -1,10 +1,16 @@
 import asyncio
+import json
 import pytest
 
 from pathlib import Path
 from types import SimpleNamespace
 from hermes_cli import kanban_db as kb
 from unittest.mock import AsyncMock, MagicMock, patch
+
+
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +45,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
     try:
         tid = kb.create_task(conn, title="test task", assignee="worker1")
         kb.add_notify_sub(conn, task_id=tid, platform="telegram", chat_id="chat1")
-        kb.complete_task(conn, tid, result="completed by agent")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -68,7 +74,7 @@ async def test_notifier_unsubs_after_completed_event(kanban_home):
 
     fake_adapter.send.assert_called_once()
     call_msg = fake_adapter.send.call_args[0][1]
-    assert "completed" in call_msg
+    assert "done" in call_msg or "completed" in call_msg
 
     conn = kb.connect()
     try:
@@ -347,7 +353,7 @@ async def test_notifier_skips_subscription_owned_by_other_profile(kanban_home):
             chat_id="chat1",
             notifier_profile="default",
         )
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -403,7 +409,7 @@ async def test_notifier_delivers_subscription_owned_by_current_profile(kanban_ho
             chat_id="chat1",
             notifier_profile="default",
         )
-        kb.complete_task(conn, tid, result="done")
+        kb.complete_task(conn, tid, result=_valid_result())
     finally:
         conn.close()
 
@@ -530,6 +536,7 @@ async def test_notifier_uploads_artifacts_on_completion(kanban_home, tmp_path, m
         out = kt._handle_complete({
             "summary": "rendered the chart",
             "artifacts": [str(chart_path), str(report_path)],
+            "result": _valid_result(),
         })
     finally:
         os.environ.pop("HERMES_KANBAN_TASK", None)
@@ -616,6 +623,7 @@ async def test_notifier_artifact_delivery_skips_missing_files(kanban_home, tmp_p
         kt._handle_complete({
             "summary": "one real, one ghost",
             "artifacts": [str(real_pdf), "/tmp/definitely-does-not-exist.pdf"],
+            "result": _valid_result(),
         })
     finally:
         os.environ.pop("HERMES_KANBAN_TASK", None)

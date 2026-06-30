@@ -320,14 +320,14 @@ def _(home, kb):
     try:
         root = kb.create_task(conn, title="root", assignee="w")
         kb.claim_task(conn, root)
-        kb.complete_task(conn, root, result="ready")
+        kb.complete_task(conn, root, result=_valid_result())
         a = kb.create_task(conn, title="A", assignee="w", parents=[root])
         b = kb.create_task(conn, title="B", assignee="w", parents=[root])
         leaf = kb.create_task(conn, title="leaf", assignee="w", parents=[a, b])
 
         # A done but B not → leaf stays todo
         kb.claim_task(conn, a)
-        kb.complete_task(conn, a, result="a done")
+        kb.complete_task(conn, a, result=_valid_result())
         kb.recompute_ready(conn)
         assert kb.get_task(conn, leaf).status == "todo", (
             f"leaf should still be todo with B unfinished, got "
@@ -335,7 +335,7 @@ def _(home, kb):
         )
         # Both done → leaf promotes
         kb.claim_task(conn, b)
-        kb.complete_task(conn, b, result="b done")
+        kb.complete_task(conn, b, result=_valid_result())
         kb.recompute_ready(conn)
         assert kb.get_task(conn, leaf).status == "ready", (
             f"leaf should promote with both parents done, got "

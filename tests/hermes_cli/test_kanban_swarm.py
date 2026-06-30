@@ -8,6 +8,11 @@ from hermes_cli.kanban_swarm import (
 )
 
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
+
 def test_create_swarm_builds_parallel_workers_verifier_and_synthesizer(tmp_path):
     conn = kb.connect(tmp_path / "kanban.db")
     try:
@@ -93,6 +98,7 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
         kb.complete_task(
             conn,
             created.worker_ids[0],
+            result=_valid_result(),
             summary="A done",
             metadata={"confidence": 0.8},
         )
@@ -100,7 +106,7 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
         assert kb.get_task(conn, created.verifier_id).status == "todo"
         assert kb.get_task(conn, created.synthesizer_id).status == "todo"
 
-        kb.complete_task(conn, created.worker_ids[1], summary="B done")
+        kb.complete_task(conn, created.worker_ids[1], result=_valid_result(), summary="B done")
         kb.recompute_ready(conn)
         assert kb.get_task(conn, created.verifier_id).status == "ready"
         assert kb.get_task(conn, created.synthesizer_id).status == "todo"
@@ -108,6 +114,7 @@ def test_swarm_verifier_and_synthesis_are_dependency_gated(tmp_path):
         kb.complete_task(
             conn,
             created.verifier_id,
+            result=_valid_result(),
             summary="Verified both branches",
             metadata={"gate": "pass"},
         )

@@ -1,0 +1,48 @@
+name: Issue #146 Fail-Closed Atomicity Tests
+
+on:
+  push:
+    branches:
+      - fix/146-kanban-result-fail-closed
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-fail-closed:
+    name: "Kanban Result Atomicity Tests"
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+
+      - name: Install hermes in dev mode
+        run: |
+          pip install -e .
+
+      - name: Run issue146 fail-closed tests
+        id: tests
+        run: |
+          python -m pytest tests/hermes_cli/test_issue146_fail_closed.py -v --tb=long
+        continue-on-error: false
+
+      - name: Test summary
+        if: always()
+        run: |
+          echo "CI run complete for Issue #146"

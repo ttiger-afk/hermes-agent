@@ -36,6 +36,11 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
+
 
 @pytest.fixture
 def kanban_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -84,7 +89,7 @@ def test_worker_block_on_child_with_done_parents_is_still_sticky(kanban_home: Pa
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child", parents=[parent])
-        kb.complete_task(conn, parent, result="parent ok")
+        kb.complete_task(conn, parent, result=_valid_result())
 
         kb.claim_task(conn, child)
         kb.block_task(
@@ -121,7 +126,7 @@ def test_circuit_breaker_block_still_auto_promotes(kanban_home: Path) -> None:
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child", parents=[parent])
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
 
         # Simulate a transient circuit-breaker / direct triage that flips
         # status without emitting a ``blocked`` event — exactly what
@@ -151,7 +156,7 @@ def test_gave_up_event_alone_does_not_make_block_sticky(kanban_home: Path) -> No
     with kb.connect() as conn:
         parent = kb.create_task(conn, title="parent")
         child = kb.create_task(conn, title="child", parents=[parent])
-        kb.complete_task(conn, parent, result="ok")
+        kb.complete_task(conn, parent, result=_valid_result())
 
         # Status + event match what _record_task_failure writes when
         # the breaker trips.

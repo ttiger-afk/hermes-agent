@@ -856,6 +856,7 @@ class Task:
     branch_name: Optional[str] = None
     project_id: Optional[str] = None
     result: Optional[str] = None
+    result_sha256: Optional[str] = None
     idempotency_key: Optional[str] = None
     # Unified non-success counter. Incremented on any of:
     #   * spawn failure (dispatcher couldn't launch the worker)
@@ -945,6 +946,7 @@ class Task:
             claim_expires=row["claim_expires"],
             tenant=row["tenant"] if "tenant" in keys else None,
             result=row["result"] if "result" in keys else None,
+            result_sha256=row["result_sha256"] if "result_sha256" in keys else None,
             idempotency_key=row["idempotency_key"] if "idempotency_key" in keys else None,
             consecutive_failures=(
                 row["consecutive_failures"] if "consecutive_failures" in keys
@@ -1114,6 +1116,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     claim_expires        INTEGER,
     tenant               TEXT,
     result               TEXT,
+    result_sha256        TEXT,
     idempotency_key      TEXT,
     -- Unified consecutive-failure counter. Incremented on spawn
     -- failure, timeout, or crash; reset only on successful completion.
@@ -1983,6 +1986,16 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "tasks",
             "block_recurrences",
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
+        )
+
+    if "result_sha256" not in cols:
+        # Canonical SHA-256 of the result JSON. Written atomically
+        # alongside ``result`` and ``status='done'`` by ``complete_task``
+        # so downstream verification (Temporal watch_kanban, cross-node
+        # Verifier, Canary contract gates) can detect torn/missing
+        # results without fetching the full JSON payload.
+        _add_column_if_missing(
+            conn, "tasks", "result_sha256", "result_sha256 TEXT"
         )
 
     # Indexes over additive ``tasks`` columns must be created after the
@@ -3933,6 +3946,64 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+def _canonical_result_sha256(result: str) -> str:
+    """Return the SHA-256 hex digest of the canonical result JSON.
+
+    Parses *result* as JSON, re-serializes with sorted keys and compact
+    separators, then hashes the canonical byte representation.  If
+    *result* is not valid JSON the function still produces a hash
+    (best-effort) so callers always have a non-NULL value to compare.
+    """
+    try:
+        parsed = json.loads(result)
+        canonical = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError, UnicodeError):
+        # Non-JSON result: hash the raw string (best-effort)
+        canonical = result.encode("utf-8")
+    else:
+        canonical = canonical.encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _validate_completion_result(result: Optional[str]) -> str:
+    """Validate result before marking a task ``done``.
+
+    Returns the canonical (compact, sorted-key) JSON string on success.
+
+    Raises ``ValueError`` for any of:
+    - result is None
+    - result is not a string
+    - result is empty / whitespace-only
+    - result is the empty object ``{}``
+    - result is not valid JSON
+    - JSON serialization round-trip fails
+
+    A ``ValueError`` is treated by the caller as: *do not write done*,
+    emit a ``completion_blocked_invalid_result`` event, and return False
+    so the task stays retryable (or can be manually failed).
+    """
+    if result is None:
+        raise ValueError("result must not be None")
+    if not isinstance(result, str):
+        raise ValueError(f"result must be a string, got {type(result).__name__}")
+    stripped = result.strip()
+    if not stripped:
+        raise ValueError("result must not be an empty string")
+    if stripped == "{}":
+        raise ValueError("result must not be an empty object")
+    # Structural validation: must be valid JSON.
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"result is not valid JSON: {e}")
+    # Serialization round-trip: encode back to canonical form.
+    try:
+        canonical = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"result JSON serialization failed: {e}")
+    return canonical
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -3973,11 +4044,14 @@ def complete_task(
     """
     now = int(time.time())
 
-    # Gate: verify created_cards BEFORE the main write txn. A rejected
+    # Gate 1: verify created_cards BEFORE any state mutation. A rejected
     # completion still needs an auditable event, so we emit it in a
     # tiny dedicated txn, then raise. The caller is responsible for
     # surfacing HallucinatedCardsError to the worker; this function
     # never mutates task state on a phantom-card rejection.
+    # This runs BEFORE result validation so workers always get the
+    # most actionable error (phantom card IDs) rather than a cryptic
+    # "result must not be None" message. See #22923 / Issue #146.
     if created_cards:
         verified_cards, phantom_cards = _verify_created_cards(
             conn, task_id, created_cards
@@ -4000,41 +4074,74 @@ def complete_task(
     else:
         verified_cards = []
 
+    # --- result validation (fail-closed, Issue #146) ---
+    # Validate AND canonicalise the result BEFORE entering the write
+    # transaction.  Enforced for worker-driven completions (where
+    # expected_run_id is set) AND for any task currently in 'running'
+    # state (claimed by a worker).  Manual CLI/dashboard completions of
+    # non-running tasks (ready/blocked) skip validation.
+    task_row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    is_worker_completion = (
+        expected_run_id is not None
+        or (task_row is not None and task_row["status"] == "running")
+    )
+    if is_worker_completion:
+        try:
+            result = _validate_completion_result(result)
+        except ValueError as exc:
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id, "completion_blocked_invalid_result",
+                    {
+                        "error": str(exc),
+                        "result_preview": (
+                            (result or "").strip()[:400] if result else None
+                        ),
+                    },
+                )
+            return False
+    result_sha256 = _canonical_result_sha256(result) if result else None
+
+    # --- atomic completion write ---
     with write_txn(conn):
         if expected_run_id is None:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL,
-                       block_kind   = NULL,
+                   SET status        = 'done',
+                       result        = ?,
+                       result_sha256 = ?,
+                       completed_at  = ?,
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL,
+                       block_kind    = NULL,
                        block_recurrences = 0
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                 """,
-                (result, now, task_id),
+                (result, result_sha256, now, task_id),
             )
         else:
             cur = conn.execute(
                 """
                 UPDATE tasks
-                   SET status       = 'done',
-                       result       = ?,
-                       completed_at = ?,
-                       claim_lock   = NULL,
-                       claim_expires= NULL,
-                       worker_pid   = NULL,
-                       block_kind   = NULL,
+                   SET status        = 'done',
+                       result        = ?,
+                       result_sha256 = ?,
+                       completed_at  = ?,
+                       claim_lock    = NULL,
+                       claim_expires = NULL,
+                       worker_pid    = NULL,
+                       block_kind    = NULL,
                        block_recurrences = 0
                  WHERE id = ?
                    AND status IN ('running', 'ready', 'blocked')
                    AND current_run_id = ?
                 """,
-                (result, now, task_id, int(expected_run_id)),
+                (result, result_sha256, now, task_id, int(expected_run_id)),
             )
         if cur.rowcount != 1:
             return False
@@ -4086,6 +4193,27 @@ def complete_task(
             completed_payload,
             run_id=run_id,
         )
+    # --- read-back verification (Issue #146 fail-closed) ---
+    # Re-read the committed row to confirm result and result_sha256
+    # match what we wrote.  A mismatch means the commit was torn or a
+    # concurrent writer corrupted the row — treat as a hard failure.
+    cur = conn.execute(
+        "SELECT result, result_sha256 FROM tasks WHERE id = ?", (task_id,)
+    )
+    row = cur.fetchone()
+    if row:
+        db_result, db_sha256 = row[0], row[1]
+        if db_result != result:
+            raise RuntimeError(
+                f"Read-back mismatch for task {task_id}: "
+                f"expected result length={len(result)}, "
+                f"got length={len(db_result or '')}"
+            )
+        if db_sha256 != result_sha256:
+            raise RuntimeError(
+                f"Read-back sha256 mismatch for task {task_id}: "
+                f"expected {result_sha256}, got {db_sha256}"
+            )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the

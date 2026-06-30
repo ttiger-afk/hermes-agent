@@ -16,6 +16,11 @@ from hermes_cli import kanban_db as kb
 from hermes_cli.plugins import VALID_HOOKS, get_plugin_manager
 
 
+def _valid_result():
+    """Return a valid JSON result string for tests that need one."""
+    return '{"ok":true,"test":true}'
+
+
 @pytest.fixture
 def kanban_home(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
@@ -75,7 +80,7 @@ def test_complete_fires_hook_with_summary(kanban_home, captured_hooks):
     try:
         tid = kb.create_task(conn, title="t", assignee="worker")
         kb.claim_task(conn, tid)
-        assert kb.complete_task(conn, tid, summary="all done")
+        assert kb.complete_task(conn, tid, summary="all done", result=_valid_result())
     finally:
         conn.close()
     fired = [e for e in captured_hooks if e[0] == "kanban_task_completed"]
@@ -106,7 +111,7 @@ def test_no_hook_on_failed_transition(kanban_home, captured_hooks):
     conn = kb.connect()
     try:
         # Completing a task that doesn't exist returns False without firing.
-        assert kb.complete_task(conn, "t_doesnotexist", summary="x") is False
+        assert kb.complete_task(conn, "t_doesnotexist", summary="x", result=_valid_result()) is False
     finally:
         conn.close()
     assert [e for e in captured_hooks if e[0] == "kanban_task_completed"] == []
@@ -127,7 +132,7 @@ def test_misbehaving_hook_does_not_break_transition(kanban_home, monkeypatch):
             tid = kb.create_task(conn, title="t", assignee="worker")
             kb.claim_task(conn, tid)
             # Despite the raising hook, completion succeeds and persists.
-            assert kb.complete_task(conn, tid, summary="ok") is True
+            assert kb.complete_task(conn, tid, summary="ok", result=_valid_result()) is True
             assert kb.get_task(conn, tid).status == "done"
         finally:
             conn.close()
